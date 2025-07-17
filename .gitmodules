@@ -1,0 +1,3 @@
+[submodule "indicator_calculator"]
+	path = indicator_calculator
+	url = https://github.com/elkingarcia11/indicator_calculator.git
