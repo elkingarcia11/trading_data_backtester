@@ -2,6 +2,8 @@ import sys
 import pandas as pd
 sys.path.append('indicator-calculator')
 from indicator_calculator import IndicatorCalculator
+import datetime
+import pytz
 
 # Default signal thresholds configuration
 DEFAULT_SIGNAL_THRESHOLDS = {
@@ -27,9 +29,28 @@ def run_single_backtest(args):
     data, indicator_periods = args
     return backtest(data, indicator_periods)
 
-def backtest(data: pd.DataFrame, indicator_periods: dict = {}, signal_thresholds: dict | None = None, trade_time: str | None = None, trade_time_2: str | None = None) -> dict:
+def unix_to_edt_time(timestamp):
+    # Convert milliseconds to seconds if timestamp is too large
+    if timestamp > 1e12:  # If timestamp is in milliseconds (13+ digits)
+        timestamp = timestamp / 1000
+    
+    utc_dt = datetime.datetime.fromtimestamp(timestamp, tz=pytz.UTC)
+    edt_tz = pytz.timezone('US/Eastern')
+    edt_dt = utc_dt.astimezone(edt_tz)
+    
+    hour = edt_dt.hour  # 0-23
+    minute = edt_dt.minute  # 0-59
+    
+    return hour, minute
+
+def backtest(data: pd.DataFrame, indicator_periods: dict = {}, signal_thresholds: dict | None = None, start_time: tuple[int, int] | None = None, end_time: tuple[int, int] | None = None) -> dict:
     """
     Backtest the indicator combinations
+    start time format int hours, int minutes
+    end time format int hours, int minutes
+
+    if trade open and current time is after end time exit trade, else check sell signals
+    if trade not open and current time is < start time, do not open trade, else check buy signals
     """
     if signal_thresholds is None:
         signal_thresholds = DEFAULT_SIGNAL_THRESHOLDS.copy()
@@ -38,7 +59,7 @@ def backtest(data: pd.DataFrame, indicator_periods: dict = {}, signal_thresholds
 
     # Save dataframe with indicators to CSV for verification
     # data.to_csv(f'data/indicators/indicators_{indicator_periods}.csv', index=False)
-    print(indicator_periods)
+    print(start_time, end_time)
 
     # Trades data
     trades = []
@@ -49,46 +70,86 @@ def backtest(data: pd.DataFrame, indicator_periods: dict = {}, signal_thresholds
     entry_price = 0
     exit_price = 0
     trade_start_timestamp = 0
-    profit = 0
     max_unrealized_profit = 0
-    min_unrealized_profit = 0
+    min_unrealized_profit = float('inf')  # Initialize to infinity for proper min tracking
 
     trailing_stop_pct = 0.1
     stop_loss_pct = 0.05
+    
+    def should_exit_trade(row, trade_open, entry_price):
+        """Helper function to determine if trade should be exited"""
+        if not trade_open:
+            return False
+        
+        # Check if current time is after end time
+        if start_time and end_time:
+            current_hour, current_minute = unix_to_edt_time(row['timestamp'])
+            if current_hour > end_time[0] or (current_hour == end_time[0] and current_minute >= end_time[1]):
+                return True
+        
+        # Check sell signals and stop conditions
+        return (check_signal(row, 'sell', signal_thresholds) or 
+                row['close'] <= entry_price * (1 - stop_loss_pct) or 
+                row['close'] >= entry_price * (1 + trailing_stop_pct))
+    
+    def should_enter_trade(row):
+        """Helper function to determine if trade should be entered"""
+        # Check if current time is before start time
+        if start_time and end_time:
+            current_hour, current_minute = unix_to_edt_time(row['timestamp'])
+            if current_hour < start_time[0] or (current_hour == start_time[0] and current_minute < start_time[1]):
+                return False
+            
+            # Check if current time is before end time
+            if current_hour > end_time[0] or (current_hour == end_time[0] and current_minute >= end_time[1]):
+                return False
+        
+        return check_signal(row, 'buy', signal_thresholds)
+    
+    def close_trade(row):
+        """Helper function to close a trade and record it"""
+        nonlocal trade_open, entry_price, exit_price, trade_start_timestamp, max_unrealized_profit, min_unrealized_profit
+        
+        exit_price = row['close']
+        trade_duration = row['timestamp'] - trade_start_timestamp
+        profit = exit_price - entry_price
+        
+        trades.append({
+            'entry_price': entry_price,
+            'exit_price': exit_price,
+            'trade_duration': trade_duration,
+            'profit': profit,
+            'max_unrealized_profit': max_unrealized_profit,
+            'min_unrealized_profit': min_unrealized_profit
+        })
+
+        # Reset trade state
+        trade_open = False
+        entry_price = 0
+        exit_price = 0
+        trade_start_timestamp = 0
+        max_unrealized_profit = 0
+        min_unrealized_profit = float('inf')
+    
     for _, row in data.iterrows():
         if trade_open:
-            if check_signal(row, 'sell', signal_thresholds) or row['close'] < entry_price * (1-stop_loss_pct) or row['close'] > entry_price * (1+trailing_stop_pct):
-                exit_price = row['close']
-                trade_duration = row['timestamp'] - trade_start_timestamp
-                profit = exit_price - entry_price
-                max_unrealized_profit = max(max_unrealized_profit, row['close'] - entry_price)
-                min_unrealized_profit = min(min_unrealized_profit, row['close'] - entry_price)
-                trades.append({
-                    'entry_price': entry_price,
-                    'exit_price': exit_price,
-                    'trade_duration': trade_duration,
-                    'profit': profit,
-                    'max_unrealized_profit': max_unrealized_profit,
-                    'min_unrealized_profit': min_unrealized_profit
-                })
-
-                trade_open = False
-                entry_price = 0
-                exit_price = 0
-                trade_start_timestamp = 0
-                profit = 0
-                max_unrealized_profit = 0
-                min_unrealized_profit = 0
-            else:
-                max_unrealized_profit = max(max_unrealized_profit, row['close'] - entry_price)
-                min_unrealized_profit = min(min_unrealized_profit, row['close'] - entry_price)
+            # Update unrealized profit/loss
+            current_pnl = row['close'] - entry_price
+            max_unrealized_profit = max(max_unrealized_profit, current_pnl)
+            min_unrealized_profit = min(min_unrealized_profit, current_pnl)
+            
+            # Check if we should exit the trade
+            if should_exit_trade(row, trade_open, entry_price):
+                close_trade(row)
         else:
-            if check_signal(row, 'buy', signal_thresholds):
+            # Check if we should enter a trade
+            if should_enter_trade(row):
                 entry_price = row['close']
                 trade_open = True
                 trade_start_timestamp = row['timestamp']
+                max_unrealized_profit = 0
+                min_unrealized_profit = 0
 
-    
     # Return the following: total_trades, total_trade_profit, average_trade_profit, win_rate, max_unrealized_profit, min_unrealized_profit, average_max_unrealized_profit, average_min_unrealized_profit, max_trade_duration, min_trade_duration, average_trade_duration, description_of_indicator_periods
     
     total_trades = len(trades)
@@ -107,7 +168,6 @@ def backtest(data: pd.DataFrame, indicator_periods: dict = {}, signal_thresholds
     max_trade_duration = max_trade_duration / (1000 * 60)  # Convert ms to minutes
     min_trade_duration = min_trade_duration / (1000 * 60)  # Convert ms to minutes
     average_trade_duration = average_trade_duration / (1000 * 60)  # Convert ms to minutes
-    description_of_indicator_periods = indicator_periods.copy()
     return {
         'total_trades': total_trades,
         'win_rate': win_rate,
@@ -120,6 +180,8 @@ def backtest(data: pd.DataFrame, indicator_periods: dict = {}, signal_thresholds
         'max_trade_duration (minutes)': max_trade_duration,
         'min_trade_duration (minutes)': min_trade_duration,
         'average_trade_duration (minutes)': average_trade_duration,
+        'start_time': start_time,
+        'end_time': end_time,
         **{f'{indicator}': indicator_periods[indicator] for indicator in indicator_periods},
     }
 

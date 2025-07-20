@@ -144,19 +144,20 @@ def main():
         'macd_signal': 30
     }
     spy_base_indicator_periods = {
-        'ema': 16, #16
-        'vwma': 13, #13
+        'ema': 16,
+        'vwma': 13,
         'roc': 3, 
         'roc_of_roc': 3,
         'macd_fast': 9,
         'macd_slow': 12,
         'macd_signal': 12
     }
+    # Testing different indicator period combinations
     for symbol in ['QQQ', 'SPY']:
         if symbol == 'QQQ':
-            test_combinations = test_stoch_periods(qqq_base_indicator_periods)
+            test_combinations = [qqq_base_indicator_periods]
         else:
-            test_combinations = test_stoch_periods(spy_base_indicator_periods)
+            test_combinations = [spy_base_indicator_periods]
         data = pd.read_csv(f'data/5m/{symbol}.csv')
         test_indicator_period_combinations(data, symbol, test_combinations)
 
