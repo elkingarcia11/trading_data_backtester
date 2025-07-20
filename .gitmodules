@@ -1,3 +1,6 @@
 [submodule "indicator-calculator"]
 	path = indicator-calculator
 	url = https://github.com/elkingarcia11/indicator-calculator.git
+[submodule "market-data-api"]
+	path = market-data-api
+	url = https://github.com/elkingarcia11/market-data-api.git

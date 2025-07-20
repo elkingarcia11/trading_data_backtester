@@ -1,7 +1,7 @@
 import sys
 import pandas as pd
-sys.path.append('indicator_calculator')
-from indicator_calculator.indicator_calculator import IndicatorCalculator
+sys.path.append('indicator-calculator')
+from indicator_calculator import IndicatorCalculator
 
 # Default signal thresholds configuration
 DEFAULT_SIGNAL_THRESHOLDS = {
@@ -35,6 +35,10 @@ def backtest(data: pd.DataFrame, indicator_periods: dict = {}, signal_thresholds
         signal_thresholds = DEFAULT_SIGNAL_THRESHOLDS.copy()
     
     data = IndicatorCalculator().calculate_all_indicators(data, indicator_periods)
+
+    # Save dataframe with indicators to CSV for verification
+    # data.to_csv(f'data/indicators/indicators_{indicator_periods}.csv', index=False)
+    print(indicator_periods)
 
     # Trades data
     trades = []
@@ -98,6 +102,11 @@ def backtest(data: pd.DataFrame, indicator_periods: dict = {}, signal_thresholds
     max_trade_duration = max([trade['trade_duration'] for trade in trades]) if trades else 0
     min_trade_duration = min([trade['trade_duration'] for trade in trades]) if trades else 0
     average_trade_duration = 0 if len(trades) == 0 else sum([trade['trade_duration'] for trade in trades]) / len(trades)
+    
+    # Convert durations from milliseconds to minutes
+    max_trade_duration = max_trade_duration / (1000 * 60)  # Convert ms to minutes
+    min_trade_duration = min_trade_duration / (1000 * 60)  # Convert ms to minutes
+    average_trade_duration = average_trade_duration / (1000 * 60)  # Convert ms to minutes
     description_of_indicator_periods = indicator_periods.copy()
     return {
         'total_trades': total_trades,
@@ -108,10 +117,10 @@ def backtest(data: pd.DataFrame, indicator_periods: dict = {}, signal_thresholds
         'min_unrealized_profit': min_unrealized_profit,
         'average_max_unrealized_profit': average_max_unrealized_profit,
         'average_min_unrealized_profit': average_min_unrealized_profit,
-        'max_trade_duration': max_trade_duration,
-        'min_trade_duration': min_trade_duration,
-        'average_trade_duration': average_trade_duration,
-        'description_of_indicator_periods': description_of_indicator_periods
+        'max_trade_duration (minutes)': max_trade_duration,
+        'min_trade_duration (minutes)': min_trade_duration,
+        'average_trade_duration (minutes)': average_trade_duration,
+        **{f'{indicator}': indicator_periods[indicator] for indicator in indicator_periods},
     }
 
 def check_signal(row: pd.Series, signal_type: str, signal_thresholds: dict) -> bool:
@@ -137,17 +146,10 @@ def check_signal(row: pd.Series, signal_type: str, signal_thresholds: dict) -> b
         if (signal_type == 'buy' and row['rsi'] > threshold) or (signal_type == 'sell' and row['rsi'] < threshold):
             conditions_met += 1
         conditions_to_be_met += 1
-    # Stochastic RSI K check
-    if 'stoch_rsi_k' in row:
-        threshold = signal_thresholds['stoch_rsi_k'][signal_type]
-        if (signal_type == 'buy' and row['stoch_rsi_k'] > threshold) or (signal_type == 'sell' and row['stoch_rsi_k'] < threshold):
+    # Stochastic RSI K and Dcheck
+    if 'stoch_rsi_k' in row and 'stoch_rsi_d' in row:
+        if (signal_type == 'buy' and row['stoch_rsi_k'] > row['stoch_rsi_d']) or (signal_type == 'sell' and row['stoch_rsi_k'] < row['stoch_rsi_d']):
             conditions_met += 1
-        conditions_to_be_met += 1
-    # Stochastic RSI D check
-    if 'stoch_rsi_d' in row:
-        threshold = signal_thresholds['stoch_rsi_d'][signal_type]
-        if (signal_type == 'buy' and row['stoch_rsi_d'] > threshold) or (signal_type == 'sell' and row['stoch_rsi_d'] < threshold):
-            conditions_met += 1 
         conditions_to_be_met += 1
     # MACD check
     if 'macd_line' in row and 'macd_signal' in row:
@@ -218,19 +220,3 @@ def check_signal(row: pd.Series, signal_type: str, signal_thresholds: dict) -> b
             conditions_met += 1
         conditions_to_be_met += 1
     return conditions_met >= conditions_to_be_met if signal_type == 'buy' else conditions_met >= conditions_to_be_met - 1
-
-def buy(row: pd.Series, signal_thresholds: dict | None = None) -> bool:
-    """
-    Buy signal - wrapper for check_signal function
-    """
-    if signal_thresholds is None:
-        signal_thresholds = DEFAULT_SIGNAL_THRESHOLDS.copy()
-    return check_signal(row, 'buy', signal_thresholds)
-    
-def sell(row: pd.Series, signal_thresholds: dict | None = None) -> bool:
-    """
-    Sell signal - wrapper for check_signal function
-    """
-    if signal_thresholds is None:
-        signal_thresholds = DEFAULT_SIGNAL_THRESHOLDS.copy()
-    return check_signal(row, 'sell', signal_thresholds)
