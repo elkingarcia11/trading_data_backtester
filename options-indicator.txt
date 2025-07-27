@@ -1,0 +1,29 @@
+    DAY ONE:
+    
+    qqq_base_intraday_indicator_periods_1m = {
+        'ema': 12,
+        'vwma': 7,
+        'roc': 14,
+        'roc_of_roc': 11,
+        'stoch_rsi_period': 10,
+        'stoch_rsi_k': 9,
+        'stoch_rsi_d': 11,
+        # OR MACD
+        'macd_fast': 24,
+        'macd_slow': 33,
+        'macd_signal': 28
+    }
+
+    spy_base_intraday_indicator_periods_1m = {
+        'ema': 16,
+        'vwma': 6,
+        'roc': 13,
+        'roc_of_roc': 12,
+        'stoch_rsi_period': 10,
+        'stoch_rsi_k': 10,
+        'stoch_rsi_d': 11,
+        # OR MACD
+        'macd_fast': 42,
+        'macd_slow': 44,
+        'macd_signal': 43
+    }

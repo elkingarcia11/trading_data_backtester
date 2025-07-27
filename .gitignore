@@ -3,3 +3,4 @@ results.csv
 __pycache__/
 .venv/
 .env
+.DS_Store
