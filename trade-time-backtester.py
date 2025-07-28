@@ -8,7 +8,6 @@ import multiprocessing as mp
 from multiprocessing import Pool, cpu_count
 from functools import partial
 from backtester import backtest
-from indicator_calculator import IndicatorCalculator
 
 def run_qqq_backtest(args):
     """
