@@ -18,8 +18,21 @@ def fetch_options_data(file_path, symbol: str):
         dfs.append(df)
     return dfs
 
+def test_ema_vwma_roc_and_roc_of_roc_periods(base_indicator_periods):   
+    test_combinations = []
+    for ema in range(8,14):
+        for vwma in range(12,22):
+            if ema != vwma:
+                for roc in range(3,14):
+                    for roc_of_roc in range(7,21):
+                        base_indicator_periods['ema'] = ema 
+                        base_indicator_periods['vwma'] = vwma
+                        base_indicator_periods['roc'] = roc
+                        base_indicator_periods['roc_of_roc'] = roc_of_roc
+                        test_combinations.append(base_indicator_periods.copy())
+    return test_combinations
+
 def test_roc_and_roc_of_roc_periods(base_indicator_periods):
-    print(base_indicator_periods)
     test_combinations = []
     for roc in range(3,21):
         for roc_of_roc in range(3,21):
@@ -37,11 +50,12 @@ def test_roc_periods(base_indicator_periods):
 
 def test_ema_vwma_periods(base_indicator_periods):
     test_combinations = []
-    for ema in range(3,21):
-        for vwma in range(3,21):
-            base_indicator_periods['ema'] = ema
-            base_indicator_periods['vwma'] = vwma
-            test_combinations.append(base_indicator_periods.copy())
+    for ema in range(5,21):
+        for vwma in range(5,21):
+            if ema != vwma:
+                base_indicator_periods['ema'] = ema
+                base_indicator_periods['vwma'] = vwma
+                test_combinations.append(base_indicator_periods.copy())
     return test_combinations
 
 def test_macd_periods(base_indicator_periods):
@@ -173,20 +187,20 @@ def test_indicator_period_combinations(data: pd.DataFrame, timeframe: str, symbo
             print(f"Created new file with {len(results)} results")
         
         # Sort by appropriate metric
-        sorted_df = combined_df.sort_values(['expected_profit'], ascending=[False])
+        sorted_df = combined_df.sort_values(['average_trade_profit'], ascending=[False])
         print(f"Saved {len(sorted_df)} total results to {filepath} (sorted by total profit)")
         
         if is_options:
-            # Extract top 10 trades
-            top_10_trades = sorted_df.head(10).copy()
+            # Extract trades with total_trades > 5
+            new_trades = sorted_df[sorted_df['total_trades'] > 5].copy()
             
             combined_filepath = f'data/results/options/{symbol}.csv'
             if os.path.exists(combined_filepath):
                 existing_combined_df = pd.read_csv(combined_filepath)
-                combined_df = pd.concat([existing_combined_df, top_10_trades], ignore_index=True)
-                sorted_combined_df = combined_df.sort_values(['expected_profit'], ascending=[False]) 
+                combined_df = pd.concat([existing_combined_df, new_trades], ignore_index=True)
+                sorted_combined_df = combined_df.sort_values(['average_trade_profit'], ascending=[False]) 
             else:
-                sorted_combined_df = top_10_trades
+                sorted_combined_df = new_trades
             sorted_combined_df.to_csv(combined_filepath, mode='w', index=False)
         
         # Save sorted combined results
@@ -210,6 +224,25 @@ def test_different_roc_periods(base_indicator_periods):
         test_combinations.append(base_indicator_periods.copy())
     return test_combinations
 
+def test_ema_vwma_roc_roc_of_roc_macd_periods(base_indicator_periods):
+    test_combinations = []
+    for ema in range(8,16,2):
+        for vwma in range(12,24,2):
+            for roc in range(3,16,2):
+                for roc_of_roc in range(7,24,2):
+                    for macd_fast in range(5,46,2):
+                        for macd_slow in range(6,45,2):
+                            for macd_signal in range(2,45):
+                                base_indicator_periods['ema'] = ema
+                                base_indicator_periods['vwma'] = vwma
+                                base_indicator_periods['roc'] = roc
+                                base_indicator_periods['roc_of_roc'] = roc_of_roc
+                                base_indicator_periods['macd_fast'] = macd_fast
+                                base_indicator_periods['macd_slow'] = macd_slow
+                                base_indicator_periods['macd_signal'] = macd_signal
+                                test_combinations.append(base_indicator_periods.copy())
+    return test_combinations
+
 def test_intraday_periods(is_options: bool = False, use_parallel: bool = True, max_workers: int = None):  
     if is_options:
         # Remove directory data/results/options/
@@ -218,31 +251,9 @@ def test_intraday_periods(is_options: bool = False, use_parallel: bool = True, m
         os.makedirs('data/results/options/', exist_ok=True)
 
     qqq_base_intraday_indicator_periods_1m = {
-        'ema': 12,
-        'vwma': 7,
-        'roc': 14,
-        'roc_of_roc': 11,
-        'stoch_rsi_period': 10,
-        'stoch_rsi_k': 9,
-        'stoch_rsi_d': 11,
-        # OR MACD
-        'macd_fast': 24,
-        'macd_slow': 33,
-        'macd_signal': 28
     }
 
     spy_base_intraday_indicator_periods_1m = {
-        'ema': 16,
-        'vwma': 6,
-        'roc': 13,
-        'roc_of_roc': 12,
-        'stoch_rsi_period': 10,
-        'stoch_rsi_k': 10,
-        'stoch_rsi_d': 11,
-        # OR MACD
-        'macd_fast': 42,
-        'macd_slow': 44,
-        'macd_signal': 43
     }
 
     symbols = open('symbols.txt', 'r').read().splitlines()
@@ -258,13 +269,13 @@ def test_intraday_periods(is_options: bool = False, use_parallel: bool = True, m
             if is_testing_finalized_indicator_periods:
                 test_combinations = [qqq_base_intraday_indicator_periods_1m]
             else:
-                test_combinations = test_stoch_periods(base_indicator_periods)
+                test_combinations = test_ema_vwma_roc_roc_of_roc_macd_periods(base_indicator_periods)
         else: 
             base_indicator_periods = spy_base_intraday_indicator_periods_1m
             if is_testing_finalized_indicator_periods:
                 test_combinations = [spy_base_intraday_indicator_periods_1m]
             else:
-                test_combinations = test_stoch_periods(base_indicator_periods)
+                test_combinations = test_ema_vwma_roc_roc_of_roc_macd_periods(base_indicator_periods)
         test_intraday_periods_for(symbol, is_options, test_combinations, is_random_sampling, use_parallel, max_workers)
 
 def test_intraday_periods_for(symbol, is_options, test_combinations, is_random_sampling, use_parallel, max_workers):
@@ -396,10 +407,10 @@ def test_interday_periods():
     for symbol in symbols:
         if symbol == 'QQQ':
             base_indicator_periods = qqq_base_interday_indicator_periods
-            test_combinations = test_roc_periods(base_indicator_periods)
+            test_combinations = test_ema_vwma_roc_and_roc_of_roc_periods(base_indicator_periods)
         else:
             base_indicator_periods = spy_base_interday_indicator_periods
-            test_combinations = test_roc_periods(base_indicator_periods)
+            test_combinations = test_ema_vwma_roc_and_roc_of_roc_periods(base_indicator_periods)
         for timeframe in timeframes:
             data = pd.read_csv(f'data/{timeframe}/{symbol}.csv')
             test_indicator_period_combinations(data, timeframe, symbol, test_combinations, False)

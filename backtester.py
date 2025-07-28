@@ -7,12 +7,13 @@ from indicator_calculator import IndicatorCalculator
 # Default signal thresholds configuration
 DEFAULT_SIGNAL_THRESHOLDS = {
     'rsi': {'buy': 50, 'sell': 50},
+    'ema_period': {7},
+    'vwma_period': {12},
     'stoch_rsi_k': {'buy': 50, 'sell': 50},
     'stoch_rsi_d': {'buy': 50, 'sell': 50},
     'macd': {'buy': 'line_above_signal', 'sell': 'line_below_signal'},
     'roc': {'buy': 0, 'sell': 0},
     'roc_of_roc': {'buy': 0, 'sell': 0},
-    'ema_vwma': {'buy': 'ema_above_vwma', 'sell': 'ema_below_vwma'},
     'sma': {'buy': 0, 'sell': 0},
     'volatility': {'buy': 0, 'sell': 0},
     'price_change': {'buy': 0, 'sell': 0},
@@ -26,15 +27,6 @@ def run_single_backtest(args):
     Helper function to run a single backtest for parallel processing
     """
     data, indicator_periods, is_options = args
-    
-    # Clean indicator columns in case data cleaning wasn't preserved during serialization
-    indicator_columns = ['macd_line', 'ema', 'roc', 'macd_signal', 'vwma', 'macd_histogram', 'roc_of_roc',
-                       'rsi', 'sma', 'bollinger_upper', 'bollinger_lower', 'bollinger_bands_width',
-                       'stoch_rsi_k', 'stoch_rsi_d', 'atr', 'volatility', 'price_change']
-    
-    for col in indicator_columns:
-        if col in data.columns:
-            data[col] = pd.to_numeric(data[col], errors='coerce')
     
     return backtest(data, indicator_periods, is_options=is_options)
 
@@ -102,6 +94,12 @@ def calculate_trade_duration(start_timestamp, end_timestamp):
                 print(f"Warning: Could not parse timestamp strings for duration calculation")
                 return 0
     
+    # Handle datetime objects (pandas Timestamp)
+    elif hasattr(start_timestamp, 'timestamp') and hasattr(end_timestamp, 'timestamp'):
+        duration = end_timestamp - start_timestamp
+        # Convert to milliseconds for consistency
+        return duration.total_seconds() * 1000
+    
     # Handle numeric Unix timestamps
     else:
         return end_timestamp - start_timestamp
@@ -121,7 +119,10 @@ def backtest(data: pd.DataFrame, indicator_periods: dict = {}, signal_thresholds
 
     try:
         data = IndicatorCalculator().calculate_all_indicators(data, indicator_periods, is_options)
-
+        # if ema and vwma column exists
+        if 'ema' in indicator_periods and 'vwma' in indicator_periods:
+            signal_thresholds['ema_period'] = indicator_periods['ema']
+            signal_thresholds['vwma_period'] = indicator_periods['vwma']
     except Exception as e:
         print(f"Error in calculate_all_indicators: {e}")
         print(f"Indicator periods: {indicator_periods}")
@@ -292,6 +293,7 @@ def backtest(data: pd.DataFrame, indicator_periods: dict = {}, signal_thresholds
     return {
         'total_trades': total_trades,
         'win_rate': win_rate,
+        'winning_trades': total_trades * win_rate,
         'average_trade_profit': average_trade_profit,
         'average_trade_profit_percentage': average_trade_profit_percentage,
         'expected_profit': win_rate*average_trade_profit_percentage*100,
@@ -313,41 +315,26 @@ def check_signal(row: pd.Series, signal_type: str, signal_thresholds: dict, is_o
     """
     Unified function to check buy or sell signals based on available indicators
     Returns False if any required indicators are missing/NaN
+    
+    Args:
+        row: DataFrame row containing indicator values
+        signal_type: 'buy' or 'sell'
+        signal_thresholds: Dictionary containing threshold configurations
+        is_options: Whether this is options data (affects price field used)
+    
+    Returns:
+        bool: True if signal conditions are met, False otherwise
     """
     
-    # Define which indicators we'll actually check based on what's being tested
-    required_indicators = []
+    # Validate inputs
+    if signal_type not in ['buy', 'sell']:
+        raise ValueError(f"signal_type must be 'buy' or 'sell', got: {signal_type}")
     
-    # Only check indicators that are actually being used for signal generation
-    if 'ema' in row and 'vwma' in row:
-        required_indicators.extend(['ema', 'vwma'])
-    if 'rsi' in row:
-        required_indicators.append('rsi') 
-    if 'macd_line' in row and 'macd_signal' in row:
-        required_indicators.extend(['macd_line', 'macd_signal'])
-    if 'roc' in row:
-        required_indicators.append('roc')
-    if 'roc_of_roc' in row:
-        required_indicators.append('roc_of_roc')
-    
-    # Check for NaN/None only in indicators we're actually using
-    for indicator in required_indicators:
-        if indicator in row:
-            value = row[indicator]
-            # Check for NaN, None, empty strings, or string 'nan'
-            if (pd.isna(value) or 
-                value is None or 
-                (isinstance(value, str) and (value.strip() == '' or value.lower() in ['nan']))):
-                return False
-            # Check for lists/tuples with invalid values
-            if isinstance(value, (list, tuple)):
-                if any(x is None or (isinstance(x, str) and (x.strip() == '' or x.lower() in ['nan'])) or pd.isna(x) for x in value):
-                    return False
     conditions_met = 0
     conditions_to_be_met = 0
     
     # RSI check
-    if 'rsi' in row:
+    if 'rsi' in row and 'rsi' in signal_thresholds and signal_type in signal_thresholds['rsi']:
         threshold = signal_thresholds['rsi'][signal_type]
         if (signal_type == 'buy' and row['rsi'] > threshold) or (signal_type == 'sell' and row['rsi'] < threshold):
             conditions_met += 1
@@ -358,7 +345,7 @@ def check_signal(row: pd.Series, signal_type: str, signal_thresholds: dict, is_o
             conditions_met += 1
         conditions_to_be_met += 1
     # MACD check
-    if 'macd_line' in row and 'macd_signal' in row:
+    if 'macd_line' in row and 'macd_signal' in row and 'macd' in signal_thresholds and signal_type in signal_thresholds['macd']:
         threshold_type = signal_thresholds['macd'][signal_type]
         if threshold_type == 'line_above_signal' and signal_type == 'buy' and row['macd_line'] > row['macd_signal']:
             conditions_met += 1
@@ -366,45 +353,50 @@ def check_signal(row: pd.Series, signal_type: str, signal_thresholds: dict, is_o
             conditions_met += 1
         conditions_to_be_met += 1
     # ROC check
-    if 'roc' in row:
+    if 'roc' in row and 'roc' in signal_thresholds and signal_type in signal_thresholds['roc']:
         threshold = signal_thresholds['roc'][signal_type]
         if (signal_type == 'buy' and row['roc'] > threshold) or (signal_type == 'sell' and row['roc'] < threshold):
             conditions_met += 1
         conditions_to_be_met += 1
     # ROC of ROC check
-    if 'roc_of_roc' in row:
+    if 'roc_of_roc' in row and 'roc_of_roc' in signal_thresholds and signal_type in signal_thresholds['roc_of_roc']:
         threshold = signal_thresholds['roc_of_roc'][signal_type]
         if (signal_type == 'buy' and row['roc_of_roc'] > threshold) or (signal_type == 'sell' and row['roc_of_roc'] < threshold):
             conditions_met += 1
         conditions_to_be_met += 1
     # EMA vs VWMA check
-    if 'ema' in row and 'vwma' in row:
-        threshold_type = signal_thresholds['ema_vwma'][signal_type]
-        if threshold_type == 'ema_above_vwma' and signal_type == 'buy' and row['ema'] > row['vwma']:
-            conditions_met += 1
-        elif threshold_type == 'ema_below_vwma' and signal_type == 'sell' and row['ema'] < row['vwma']:
-            conditions_met += 1
+    if 'ema' in row and 'vwma' in row and 'ema_period' in signal_thresholds and 'vwma_period' in signal_thresholds:
+        if signal_type == 'buy':
+            if signal_thresholds['ema_period'] <= signal_thresholds['vwma_period'] and row['ema'] > row['vwma']:
+                conditions_met += 1
+            elif signal_thresholds['vwma_period'] < signal_thresholds['ema_period'] and row['vwma'] > row['ema']:
+                conditions_met += 1
+        else:
+            if signal_thresholds['ema_period'] <= signal_thresholds['vwma_period'] and row['ema'] < row['vwma']:
+                conditions_met += 1
+            elif signal_thresholds['vwma_period'] < signal_thresholds['ema_period'] and row['vwma'] < row['ema']:
+                conditions_met += 1
         conditions_to_be_met += 1
     # SMA check
-    if 'sma' in row:
+    if 'sma' in row and 'sma' in signal_thresholds and signal_type in signal_thresholds['sma']:
         threshold = signal_thresholds['sma'][signal_type]
         if (signal_type == 'buy' and row['sma'] > threshold) or (signal_type == 'sell' and row['sma'] < threshold):
             conditions_met += 1
         conditions_to_be_met += 1
     # Volatility check
-    if 'volatility' in row:
+    if 'volatility' in row and 'volatility' in signal_thresholds and signal_type in signal_thresholds['volatility']:
         threshold = signal_thresholds['volatility'][signal_type]
         if (signal_type == 'buy' and row['volatility'] > threshold) or (signal_type == 'sell' and row['volatility'] < threshold):
             conditions_met += 1
         conditions_to_be_met += 1
     # Price change check
-    if 'price_change' in row:
+    if 'price_change' in row and 'price_change' in signal_thresholds and signal_type in signal_thresholds['price_change']:
         threshold = signal_thresholds['price_change'][signal_type]
         if (signal_type == 'buy' and row['price_change'] > threshold) or (signal_type == 'sell' and row['price_change'] < threshold):
             conditions_met += 1
         conditions_to_be_met += 1
     # Bollinger Bands check (FIXED LOGIC)
-    if 'bollinger_bands' in row:
+    if 'bollinger_bands' in row and 'bollinger_bands' in signal_thresholds and signal_type in signal_thresholds['bollinger_bands']:
         threshold_type = signal_thresholds['bollinger_bands'][signal_type]
         bb_lower, bb_upper = row['bollinger_bands']
         price = row['close'] if not is_options else row['last_price']
@@ -414,23 +406,23 @@ def check_signal(row: pd.Series, signal_type: str, signal_thresholds: dict, is_o
             conditions_met += 1
         conditions_to_be_met += 1
     # Bollinger Bands width check
-    if 'bollinger_bands_width' in row:
+    if 'bollinger_bands_width' in row and 'bollinger_bands_width' in signal_thresholds and signal_type in signal_thresholds['bollinger_bands_width']:
         threshold = signal_thresholds['bollinger_bands_width'][signal_type]
         if (signal_type == 'buy' and row['bollinger_bands_width'] > threshold) or (signal_type == 'sell' and row['bollinger_bands_width'] < threshold):
             conditions_met += 1
         conditions_to_be_met += 1
     # ATR check
-    if 'atr' in row:
+    if 'atr' in row and 'atr' in signal_thresholds and signal_type in signal_thresholds['atr']:
         threshold = signal_thresholds['atr'][signal_type]
         if (signal_type == 'buy' and row['atr'] > threshold) or (signal_type == 'sell' and row['atr'] < threshold):
             conditions_met += 1
         conditions_to_be_met += 1
 
-    if signal_type == 'sell' and conditions_to_be_met > 1:
-        conditions_to_be_met -= 1
-        #conditions_to_be_met = conditions_to_be_met
-        
-
-    result = conditions_met >= conditions_to_be_met if signal_type == 'buy' else conditions_met >= conditions_to_be_met
+    # Return True if at least one condition is met and all available conditions are met
+    # This ensures we don't generate signals when indicators are missing/NaN
+    if conditions_to_be_met == 0:
+        return False
     
-    return result
+    if signal_type == 'sell':
+        return conditions_met >= conditions_to_be_met - 1
+    return conditions_met >= conditions_to_be_met
