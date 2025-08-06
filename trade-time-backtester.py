@@ -8,6 +8,30 @@ import multiprocessing as mp
 from multiprocessing import Pool, cpu_count
 from functools import partial
 from backtester import backtest
+import os
+
+def save_trades_to_csv(trades, periods, symbol, start_time, end_time):
+    """Save individual trades to CSV file"""
+    try:
+        # Create trades directory structure
+        trades_dir = f'data/trades/trade_time/{symbol}'
+        os.makedirs(trades_dir, exist_ok=True)
+        
+        # Create filename based on time parameters
+        start_str = f"{start_time[0]:02d}{start_time[1]:02d}"
+        end_str = f"{end_time[0]:02d}{end_time[1]:02d}"
+        param_str = '_'.join([f"{k}_{v}" for k, v in periods.items()])
+        filename = f'trades_{start_str}_to_{end_str}_{param_str}.csv'
+        filepath = os.path.join(trades_dir, filename)
+        
+        # Convert trades to DataFrame and save
+        trades_df = pd.DataFrame(trades)
+        trades_df.to_csv(filepath, index=False)
+        
+        print(f"Saved {len(trades)} trades to {filepath}")
+        
+    except Exception as e:
+        print(f"Failed to save trades for {symbol} {start_time} to {end_time}: {e}")
 
 def run_qqq_backtest(args):
     """
@@ -17,10 +41,17 @@ def run_qqq_backtest(args):
     
     try:
         qqq_result = backtest(qqq_data, qqq_periods, start_time=start_time, end_time=end_time)
-        qqq_result['symbol'] = 'QQQ'
-        qqq_result['start_time'] = f"{start_time[0]:02d}:{start_time[1]:02d}"
-        qqq_result['end_time'] = f"{end_time[0]:02d}:{end_time[1]:02d}"
-        return qqq_result
+        
+        # Save individual trades to CSV if trades exist
+        if qqq_result.get('trades') and len(qqq_result['trades']) > 0:
+            save_trades_to_csv(qqq_result['trades'], qqq_periods, 'QQQ', start_time, end_time)
+        
+        # Remove trades from result to keep summary data only
+        qqq_result_without_trades = {k: v for k, v in qqq_result.items() if k != 'trades'}
+        qqq_result_without_trades['symbol'] = 'QQQ'
+        qqq_result_without_trades['start_time'] = f"{start_time[0]:02d}:{start_time[1]:02d}"
+        qqq_result_without_trades['end_time'] = f"{end_time[0]:02d}:{end_time[1]:02d}"
+        return qqq_result_without_trades
     except Exception as e:
         print(f"Error testing QQQ {start_time} to {end_time}: {e}")
         return None
@@ -33,10 +64,17 @@ def run_spy_backtest(args):
     
     try:
         spy_result = backtest(spy_data, spy_periods, start_time=start_time, end_time=end_time)
-        spy_result['symbol'] = 'SPY'
-        spy_result['start_time'] = f"{start_time[0]:02d}:{start_time[1]:02d}"
-        spy_result['end_time'] = f"{end_time[0]:02d}:{end_time[1]:02d}"
-        return spy_result
+        
+        # Save individual trades to CSV if trades exist
+        if spy_result.get('trades') and len(spy_result['trades']) > 0:
+            save_trades_to_csv(spy_result['trades'], spy_periods, 'SPY', start_time, end_time)
+        
+        # Remove trades from result to keep summary data only
+        spy_result_without_trades = {k: v for k, v in spy_result.items() if k != 'trades'}
+        spy_result_without_trades['symbol'] = 'SPY'
+        spy_result_without_trades['start_time'] = f"{start_time[0]:02d}:{start_time[1]:02d}"
+        spy_result_without_trades['end_time'] = f"{end_time[0]:02d}:{end_time[1]:02d}"
+        return spy_result_without_trades
     except Exception as e:
         print(f"Error testing SPY {start_time} to {end_time}: {e}")
         return None

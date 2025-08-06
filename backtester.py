@@ -4,24 +4,6 @@ import pandas as pd
 sys.path.append('indicator-calculator')
 from indicator_calculator import IndicatorCalculator
 
-# Default signal thresholds configuration
-DEFAULT_SIGNAL_THRESHOLDS = {
-    'rsi': {'buy': 50, 'sell': 50},
-    'ema_period': {7},
-    'vwma_period': {12},
-    'stoch_rsi_k': {'buy': 50, 'sell': 50},
-    'stoch_rsi_d': {'buy': 50, 'sell': 50},
-    'macd': {'buy': 'line_above_signal', 'sell': 'line_below_signal'},
-    'roc': {'buy': 0, 'sell': 0},
-    'roc_of_roc': {'buy': 0, 'sell': 0},
-    'sma': {'buy': 0, 'sell': 0},
-    'volatility': {'buy': 0, 'sell': 0},
-    'price_change': {'buy': 0, 'sell': 0},
-    'bollinger_bands': {'buy': 'price_between_bands', 'sell': 'price_outside_bands'},
-    'bollinger_bands_width': {'buy': 0, 'sell': 0},
-    'atr': {'buy': 0, 'sell': 0}
-}
-
 def run_single_backtest(args):
     """
     Helper function to run a single backtest for parallel processing
@@ -105,7 +87,7 @@ def calculate_trade_duration(start_timestamp, end_timestamp):
         return end_timestamp - start_timestamp
 
 
-def backtest(data: pd.DataFrame, indicator_periods: dict = {}, signal_thresholds: dict | None = None, start_time: tuple[int, int] | None = None, end_time: tuple[int, int] | None = None, is_options: bool = False) -> dict:
+def backtest(data: pd.DataFrame, indicator_periods: dict = {}, start_time: tuple[int, int] | None = None, end_time: tuple[int, int] | None = None, is_options: bool = False) -> dict:
     """
     Backtest the indicator combinations
     start time format int hours, int minutes
@@ -114,15 +96,12 @@ def backtest(data: pd.DataFrame, indicator_periods: dict = {}, signal_thresholds
     if trade open and current time is after end time exit trade, else check sell signals
     if trade not open and current time is < start time, do not open trade, else check buy signals
     """
-    if signal_thresholds is None:
-        signal_thresholds = DEFAULT_SIGNAL_THRESHOLDS.copy()
-
     try:
-        data = IndicatorCalculator().calculate_all_indicators(data, indicator_periods, is_options)
-        # if ema and vwma column exists
-        if 'ema' in indicator_periods and 'vwma' in indicator_periods:
-            signal_thresholds['ema_period'] = indicator_periods['ema']
-            signal_thresholds['vwma_period'] = indicator_periods['vwma']
+        # Determine the correct price column based on whether it's options data
+        price_column = 'last_price' if is_options else 'close'
+        data = IndicatorCalculator().calculate_all_indicators(data, indicator_periods, price_column)
+        # Save dataframe with indicators to CSV for verification
+        #data.to_csv(f'data/indicators/indicators_{indicator_periods}.csv', index=False)
     except Exception as e:
         print(f"Error in calculate_all_indicators: {e}")
         print(f"Indicator periods: {indicator_periods}")
@@ -134,9 +113,6 @@ def backtest(data: pd.DataFrame, indicator_periods: dict = {}, signal_thresholds
             if col in data.columns:
                 print(f"  {col}: {data[col].head().tolist()}")
         raise e
-
-    # Save dataframe with indicators to CSV for verification
-    # data.to_csv(f'data/indicators/indicators_{indicator_periods}.csv', index=False)
 
     # Trades data
     trades = []
@@ -166,7 +142,7 @@ def backtest(data: pd.DataFrame, indicator_periods: dict = {}, signal_thresholds
                 return True
 
         # Check sell signals and stop conditions
-        if check_signal(row, 'sell', signal_thresholds, is_options):
+        if check_signal_combos(row, 'sell'):
             return True
             
         # Get current price based on asset type  
@@ -187,9 +163,10 @@ def backtest(data: pd.DataFrame, indicator_periods: dict = {}, signal_thresholds
             # Check if current time is before end time
             if current_hour > end_time[0] or (current_hour == end_time[0] and current_minute >= end_time[1]):
                 return False
-        return check_signal(row, 'buy', signal_thresholds, is_options)
 
-    def close_trade(row):
+        return check_signal_combos(row, 'buy')
+
+    def close_trade(row, entry_indicator_values, exit_indicator_values):
         """Helper function to close a trade and record it"""
         nonlocal trade_open, entry_price, exit_price, trade_start_timestamp, max_price_seen, min_price_seen
 
@@ -202,11 +179,15 @@ def backtest(data: pd.DataFrame, indicator_periods: dict = {}, signal_thresholds
 
             trades.append({
                 'entry_price': entry_price,
+                'entry_timestamp': trade_start_timestamp,
                 'exit_price': exit_price,
+                'exit_timestamp': row['timestamp'],
                 'trade_duration': trade_duration,
                 'profit': profit,
                 'max_unrealized_profit': max_unrealized_profit,
-                'max_drawdown': max_drawdown
+                'max_drawdown': max_drawdown,
+                **{f'entry_{indicator}': entry_indicator_values[indicator] for indicator in entry_indicator_values},
+                **{f'exit_{indicator}': exit_indicator_values[indicator] for indicator in exit_indicator_values},
             })
         except Exception as e:
             print(f"🔍 String error in close_trade:")
@@ -233,28 +214,47 @@ def backtest(data: pd.DataFrame, indicator_periods: dict = {}, signal_thresholds
     
     for _, row in data.iterrows():
         total_rows += 1
-        
-        if trade_open:
-            # Update unrealized profit/loss
-            current_price = row['close'] if not is_options else row['last_price']
-            max_price_seen = max(max_price_seen, current_price)
-            min_price_seen = min(min_price_seen, current_price)
+        if total_rows < indicator_periods['macd_slow'] * 3:
+            continue
+        elif trade_open:
+                # Update unrealized profit/loss
+                current_price = row['close'] if not is_options else row['last_price']
+                max_price_seen = max(max_price_seen, current_price)
+                min_price_seen = min(min_price_seen, current_price)
 
-            # Check if we should exit the trade
-            if should_exit_trade(row, trade_open, entry_price, is_options):
-                close_trade(row)
-                sell_signal_count += 1
+                # Check if we should exit the trade
+                if should_exit_trade(row, trade_open, entry_price, is_options):
+                    exit_indicator_values = {
+                        'ema': row.get('ema'),
+                        'vwma': row.get('vwma'),
+                        'macd_line': row.get('macd_line'),
+                        'macd_signal': row.get('macd_signal'),
+                        'stoch_rsi_k': row.get('stoch_rsi_k'),
+                        'stoch_rsi_d': row.get('stoch_rsi_d'),
+                        'roc': row.get('roc'),
+                        'roc_of_roc': row.get('roc_of_roc')
+                    }
+                    close_trade(row, entry_indicator_values, exit_indicator_values)
+                    sell_signal_count += 1
         else:
             # Check if we should enter a trade
             if should_enter_trade(row):
                 entry_price = row['close'] if not is_options else row['last_price']
+                entry_indicator_values = {
+                    'ema': row.get('ema'),
+                    'vwma': row.get('vwma'),
+                    'macd_line': row.get('macd_line'),
+                    'macd_signal': row.get('macd_signal'),
+                    'stoch_rsi_k': row.get('stoch_rsi_k'),
+                    'stoch_rsi_d': row.get('stoch_rsi_d'),
+                    'roc': row.get('roc'),
+                    'roc_of_roc': row.get('roc_of_roc')
+                }
                 trade_open = True
                 trade_start_timestamp = row['timestamp']
                 max_price_seen = entry_price
                 min_price_seen = entry_price
                 buy_signal_count += 1
-    
-
 
     # Return the following: total_trades, total_trade_profit, average_trade_profit, win_rate, max_unrealized_profit, min_unrealized_profit, average_max_unrealized_profit, average_min_unrealized_profit, max_trade_duration, min_trade_duration, average_trade_duration, description_of_indicator_periods
 
@@ -290,6 +290,7 @@ def backtest(data: pd.DataFrame, indicator_periods: dict = {}, signal_thresholds
         (1000 * 60)  # Convert ms to minutes
     average_trade_duration = average_trade_duration / \
         (1000 * 60)  # Convert ms to minutes
+
     return {
         'total_trades': total_trades,
         'win_rate': win_rate,
@@ -307,122 +308,85 @@ def backtest(data: pd.DataFrame, indicator_periods: dict = {}, signal_thresholds
         'average_trade_duration (minutes)': average_trade_duration,
         'start_time': start_time,
         'end_time': end_time,
+        'trades': trades,  # Add the detailed trades data
         **{f'{indicator}': indicator_periods[indicator] for indicator in indicator_periods},
     }
-
-
-def check_signal(row: pd.Series, signal_type: str, signal_thresholds: dict, is_options: bool = False) -> bool:
+    
+def check_signal_combos(row: pd.Series, signal_type: str) -> bool:
     """
-    Unified function to check buy or sell signals based on available indicators
-    Returns False if any required indicators are missing/NaN
-    
-    Args:
-        row: DataFrame row containing indicator values
-        signal_type: 'buy' or 'sell'
-        signal_thresholds: Dictionary containing threshold configurations
-        is_options: Whether this is options data (affects price field used)
-    
-    Returns:
-        bool: True if signal conditions are met, False otherwise
+    Check if any of the signal combos are met
     """
     
-    # Validate inputs
-    if signal_type not in ['buy', 'sell']:
-        raise ValueError(f"signal_type must be 'buy' or 'sell', got: {signal_type}")
-    
-    conditions_met = 0
-    conditions_to_be_met = 0
-    
-    # RSI check
-    if 'rsi' in row and 'rsi' in signal_thresholds and signal_type in signal_thresholds['rsi']:
-        threshold = signal_thresholds['rsi'][signal_type]
-        if (signal_type == 'buy' and row['rsi'] > threshold) or (signal_type == 'sell' and row['rsi'] < threshold):
-            conditions_met += 1
-        conditions_to_be_met += 1
-    # Stochastic RSI K and Dcheck
-    if 'stoch_rsi_k' in row and 'stoch_rsi_d' in row:
-        if (signal_type == 'buy' and row['stoch_rsi_k'] > row['stoch_rsi_d']) or (signal_type == 'sell' and row['stoch_rsi_k'] < row['stoch_rsi_d']):
-            conditions_met += 1
-        conditions_to_be_met += 1
-    # MACD check
-    if 'macd_line' in row and 'macd_signal' in row and 'macd' in signal_thresholds and signal_type in signal_thresholds['macd']:
-        threshold_type = signal_thresholds['macd'][signal_type]
-        if threshold_type == 'line_above_signal' and signal_type == 'buy' and row['macd_line'] > row['macd_signal']:
-            conditions_met += 1
-        elif threshold_type == 'line_below_signal' and signal_type == 'sell' and row['macd_line'] < row['macd_signal']:
-            conditions_met += 1
-        conditions_to_be_met += 1
-    # ROC check
-    if 'roc' in row and 'roc' in signal_thresholds and signal_type in signal_thresholds['roc']:
-        threshold = signal_thresholds['roc'][signal_type]
-        if (signal_type == 'buy' and row['roc'] > threshold) or (signal_type == 'sell' and row['roc'] < threshold):
-            conditions_met += 1
-        conditions_to_be_met += 1
-    # ROC of ROC check
-    if 'roc_of_roc' in row and 'roc_of_roc' in signal_thresholds and signal_type in signal_thresholds['roc_of_roc']:
-        threshold = signal_thresholds['roc_of_roc'][signal_type]
-        if (signal_type == 'buy' and row['roc_of_roc'] > threshold) or (signal_type == 'sell' and row['roc_of_roc'] < threshold):
-            conditions_met += 1
-        conditions_to_be_met += 1
-    # EMA vs VWMA check
-    if 'ema' in row and 'vwma' in row and 'ema_period' in signal_thresholds and 'vwma_period' in signal_thresholds:
-        if signal_type == 'buy':
-            if signal_thresholds['ema_period'] <= signal_thresholds['vwma_period'] and row['ema'] > row['vwma']:
-                conditions_met += 1
-            elif signal_thresholds['vwma_period'] < signal_thresholds['ema_period'] and row['vwma'] > row['ema']:
-                conditions_met += 1
-        else:
-            if signal_thresholds['ema_period'] <= signal_thresholds['vwma_period'] and row['ema'] < row['vwma']:
-                conditions_met += 1
-            elif signal_thresholds['vwma_period'] < signal_thresholds['ema_period'] and row['vwma'] < row['ema']:
-                conditions_met += 1
-        conditions_to_be_met += 1
-    # SMA check
-    if 'sma' in row and 'sma' in signal_thresholds and signal_type in signal_thresholds['sma']:
-        threshold = signal_thresholds['sma'][signal_type]
-        if (signal_type == 'buy' and row['sma'] > threshold) or (signal_type == 'sell' and row['sma'] < threshold):
-            conditions_met += 1
-        conditions_to_be_met += 1
-    # Volatility check
-    if 'volatility' in row and 'volatility' in signal_thresholds and signal_type in signal_thresholds['volatility']:
-        threshold = signal_thresholds['volatility'][signal_type]
-        if (signal_type == 'buy' and row['volatility'] > threshold) or (signal_type == 'sell' and row['volatility'] < threshold):
-            conditions_met += 1
-        conditions_to_be_met += 1
-    # Price change check
-    if 'price_change' in row and 'price_change' in signal_thresholds and signal_type in signal_thresholds['price_change']:
-        threshold = signal_thresholds['price_change'][signal_type]
-        if (signal_type == 'buy' and row['price_change'] > threshold) or (signal_type == 'sell' and row['price_change'] < threshold):
-            conditions_met += 1
-        conditions_to_be_met += 1
-    # Bollinger Bands check (FIXED LOGIC)
-    if 'bollinger_bands' in row and 'bollinger_bands' in signal_thresholds and signal_type in signal_thresholds['bollinger_bands']:
-        threshold_type = signal_thresholds['bollinger_bands'][signal_type]
-        bb_lower, bb_upper = row['bollinger_bands']
-        price = row['close'] if not is_options else row['last_price']
-        if threshold_type == 'price_between_bands' and signal_type == 'buy' and bb_lower < price < bb_upper:
-            conditions_met += 1
-        elif threshold_type == 'price_outside_bands' and signal_type == 'sell' and (price < bb_lower or price > bb_upper) and not is_options:
-            conditions_met += 1
-        conditions_to_be_met += 1
-    # Bollinger Bands width check
-    if 'bollinger_bands_width' in row and 'bollinger_bands_width' in signal_thresholds and signal_type in signal_thresholds['bollinger_bands_width']:
-        threshold = signal_thresholds['bollinger_bands_width'][signal_type]
-        if (signal_type == 'buy' and row['bollinger_bands_width'] > threshold) or (signal_type == 'sell' and row['bollinger_bands_width'] < threshold):
-            conditions_met += 1
-        conditions_to_be_met += 1
-    # ATR check
-    if 'atr' in row and 'atr' in signal_thresholds and signal_type in signal_thresholds['atr']:
-        threshold = signal_thresholds['atr'][signal_type]
-        if (signal_type == 'buy' and row['atr'] > threshold) or (signal_type == 'sell' and row['atr'] < threshold):
-            conditions_met += 1
-        conditions_to_be_met += 1
+    if signal_type == 'buy':
+        trend_conditions_met = 0
+        trend_conditions_to_be_met = 2
+        momentum_conditions_met = 0
+        momentum_conditions_to_be_met = 3
 
-    # Return True if at least one condition is met and all available conditions are met
-    # This ensures we don't generate signals when indicators are missing/NaN
-    if conditions_to_be_met == 0:
-        return False
-    
-    if signal_type == 'sell':
-        return conditions_met >= conditions_to_be_met - 1
-    return conditions_met >= conditions_to_be_met
+        if 'ema' in row and 'vwma' in row:
+            # Check if both are not nan
+            if pd.isna(row['ema']) or pd.isna(row['vwma']):
+                return False
+            elif row['ema'] > row['vwma']:
+                trend_conditions_met += 1
+
+        if 'macd_line' in row and 'macd_signal' in row:
+            if pd.isna(row['macd_line']) or pd.isna(row['macd_signal']):
+                return False
+            elif row['macd_line'] > row['macd_signal']:
+                trend_conditions_met += 1
+
+        if 'stoch_rsi_k' in row and 'stoch_rsi_d' in row:
+            if pd.isna(row['stoch_rsi_k']) or pd.isna(row['stoch_rsi_d']):
+                return False
+            elif row['stoch_rsi_k'] > row['stoch_rsi_d']:
+                momentum_conditions_met += 1
+
+        if 'roc' in row:
+            if pd.isna(row['roc']):
+                return False
+            elif row['roc'] > 0:
+                momentum_conditions_met += 1
+                
+        if 'roc_of_roc' in row:
+            if pd.isna(row['roc_of_roc']):
+                return False
+            elif row['roc_of_roc'] > 0:
+                momentum_conditions_met += 1
+
+    elif signal_type == 'sell':
+        trend_conditions_met = 0
+        trend_conditions_to_be_met = 2
+        momentum_conditions_met = 0
+        momentum_conditions_to_be_met = 10
+        if 'ema' in row and 'vwma' in row:
+            if pd.isna(row['ema']) or pd.isna(row['vwma']):
+                return False
+            elif row['ema'] < row['vwma']:
+                trend_conditions_met += 1
+
+        if 'macd_line' in row and 'macd_signal' in row:
+            if pd.isna(row['macd_line']) or pd.isna(row['macd_signal']):
+                return False
+            elif row['macd_line'] < row['macd_signal']:
+                trend_conditions_met += 1
+
+        if 'stoch_rsi_k' in row and 'stoch_rsi_d' in row:
+            if pd.isna(row['stoch_rsi_k']) or pd.isna(row['stoch_rsi_d']):
+                return False
+            if row['stoch_rsi_k'] < row['stoch_rsi_d']:
+                momentum_conditions_met += 1
+
+        if 'roc' in row:
+            if pd.isna(row['roc']):
+                return False
+            elif row['roc'] < 0:  
+                momentum_conditions_met += 1
+
+        if 'roc_of_roc' in row:
+            if pd.isna(row['roc_of_roc']):
+                return False
+            elif row['roc_of_roc'] < 0:
+                momentum_conditions_met += 1
+
+    return trend_conditions_met >= trend_conditions_to_be_met and momentum_conditions_met >= momentum_conditions_to_be_met

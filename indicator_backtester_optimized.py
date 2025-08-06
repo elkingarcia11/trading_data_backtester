@@ -5,7 +5,7 @@ Optimized version of indicator backtester with significant performance improveme
 
 import pandas as pd
 import numpy as np
-from backtester import backtest, run_single_backtest
+from backtester import backtest
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 import time
@@ -16,6 +16,7 @@ import gc
 from typing import List, Dict, Tuple, Optional
 import logging
 from datetime import datetime, timedelta
+from indicator_config import INDICATOR_RANGES
 
 # Configure logging for better performance monitoring
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -105,45 +106,109 @@ def fetch_options_data_optimized(file_path: str, symbol: str) -> List[pd.DataFra
     _data_cache[cache_key] = dfs
     return dfs
 
-def generate_combinations_optimized(base_periods: Dict) -> List[Dict]:
+def analyze_available_indicators(data: pd.DataFrame) -> Dict[str, bool]:
+    """
+    Analyze which indicators are available in the data after calculation
+    Maps parameter names to actual column names that get created
+    """
+    # Map parameter names to actual column names that get created
+    parameter_to_column_mapping = {
+        'ema': 'ema',
+        'ema_fast': 'ema_fast',  # ema_fast creates ema_fast column
+        'ema_slow': 'ema_slow',  # ema_slow creates ema_slow column
+        'vwma': 'vwma',
+        'vwma_fast': 'vwma_fast',
+        'vwma_slow': 'vwma_slow',
+        'rsi': 'rsi',
+        'stoch_rsi_k': 'stoch_rsi_k',
+        'stoch_rsi_d': 'stoch_rsi_d',
+        'stoch_rsi_period': 'stoch_rsi_k',  # stoch_rsi_period creates stoch_rsi_k and stoch_rsi_d
+        'macd_fast': 'macd_line',  # macd_fast creates macd_line, macd_signal
+        'macd_slow': 'macd_line',  # macd_slow creates macd_line, macd_signal
+        'macd_signal': 'macd_line',  # macd_signal creates macd_line, macd_signal
+        'roc': 'roc',
+        'roc_of_roc': 'roc_of_roc',
+        'sma': 'sma',
+        'volatility': 'volatility',
+        'price_change': 'price_change',
+        'bollinger_period': 'bollinger_upper',  # bollinger_period creates bollinger_upper, bollinger_lower, bollinger_bands_width
+        'bollinger_std': 'bollinger_upper',  # bollinger_std creates bollinger_upper, bollinger_lower, bollinger_bands_width
+        'atr': 'atr'
+    }
+    
+    # Use the indicator configuration to define what to look for
+    all_indicators = {indicator: False for indicator in INDICATOR_RANGES.keys()}
+    
+    # Check which indicators are actually present in the data
+    for indicator in all_indicators.keys():
+        if indicator in parameter_to_column_mapping:
+            column_name = parameter_to_column_mapping[indicator]
+            if column_name in data.columns:
+                all_indicators[indicator] = True
+        else:
+            # For parameters that don't directly map to columns, assume they're available
+            # These are input parameters for calculations, not output columns
+            if indicator in ['stoch_rsi_period', 'macd_fast', 'macd_slow', 'macd_signal']:
+                all_indicators[indicator] = True
+    
+    # Log available indicators
+    available = [k for k, v in all_indicators.items() if v]
+    logger.info(f"Available indicators in data: {available}")
+    
+    return all_indicators
+
+def generate_combinations_optimized(ranges: Dict) -> List[Dict]:
     """
     Optimized combination generator with smart filtering and reduced search space
+    Only generates combinations for indicators that are actually present in the data
     """
-    # Reduced ranges for faster testing - adjust based on your needs
-    ranges = {
-        'ema': range(7, 14),     
-        'vwma': range(12, 21),   
-        'roc': range(3, 12, 2),      
-        'roc_of_roc': range(7, 18, 2), 
-        'stoch_rsi_period': range(3, 21, 2),
-        'stoch_rsi_k': range(3, 21, 2),
-        'stoch_rsi_d': range(3, 21, 2),
-    }
+    
+    # If no available indicators provided, use all indicators from ranges
+    if not ranges:
+        logger.warning("No indicators available for combination generation")
+        return []
     
     # Generate combinations using itertools.product for better performance
     combinations = []
+    # Get the indicator names for product generation
+    indicator_names = list(ranges.keys())
     
-    # Smart filtering: only generate combinations that make sense
-    for ema, vwma, roc, roc_of_roc, stoch_rsi_period, stoch_rsi_k, stoch_rsi_d in product(
-        ranges['ema'], ranges['vwma'], ranges['roc'], ranges['roc_of_roc'],
-        ranges['stoch_rsi_period'], ranges['stoch_rsi_k'], ranges['stoch_rsi_d']
-    ):
-        if ema == vwma:
-            continue
-            
-        combo = base_periods.copy()
-        combo.update({
-            'ema': ema,
-            'vwma': vwma, 
-            'roc': roc,
-            'roc_of_roc': roc_of_roc,
-            'stoch_rsi_period': stoch_rsi_period,
-            'stoch_rsi_k': stoch_rsi_k,
-            'stoch_rsi_d': stoch_rsi_d
-        })
-        combinations.append(combo)
+    # Convert single values to ranges for product generation
+    ranges_for_product = []
+    for key, value in ranges.items():
+        if hasattr(value, '__iter__') and not isinstance(value, str):
+            # It's already iterable (range, list, etc.)
+            ranges_for_product.append(value)
+        else:
+            # It's a single value, convert to single-item range
+            ranges_for_product.append([value])
     
-    logger.info(f"Generated {len(combinations)} combinations (optimized from ~2.7M)")
+    # Generate all combinations of the available indicators
+    for values in product(*ranges_for_product):
+        combo = {}
+        
+        # Create combo with only the indicators we're actually using
+        for indicator_name, value in zip(indicator_names, values):
+            combo[indicator_name] = value
+        
+        # Apply smart filtering rules
+        skip_combo = False
+        
+        # Skip if EMA period >= VWMA period (only keep EMA < VWMA)
+        if 'ema' in combo and 'vwma' in combo and combo['ema'] >= combo['vwma']:
+            skip_combo = True
+        
+        # Skip if EMA fast >= EMA slow (only keep EMA fast < EMA slow)
+        if 'ema_fast' in combo and 'ema_slow' in combo and combo['ema_fast'] >= combo['ema_slow']:
+            skip_combo = True
+        
+        # Skip if MACD fast >= slow
+        if 'macd_fast' in combo and 'macd_slow' in combo and combo['macd_fast'] >= combo['macd_slow']:
+            skip_combo = True
+        
+        if not skip_combo:
+            combinations.append(combo)
+    logger.info(f"Generated {len(combinations)} combinations for indicators: {list(ranges.keys())} (filtered: EMA < VWMA, EMA_fast < EMA_slow, MACD_fast < MACD_slow)")
     return combinations
 
 def preprocess_data_optimized(data: pd.DataFrame, is_options: bool = False) -> pd.DataFrame:
@@ -164,9 +229,17 @@ def preprocess_data_optimized(data: pd.DataFrame, is_options: bool = False) -> p
         # Regular stock data uses 'datetime' column
         if 'datetime' in data.columns and not pd.api.types.is_datetime64_any_dtype(data['datetime']):
             try:
-                data['datetime'] = pd.to_datetime(data['datetime'], format='mixed')
+                # Remove timezone suffix (EST/EDT) and parse
+                # e.g., "2025-01-02 09:30:00 EST" -> "2025-01-02 09:30:00"
+                datetime_clean = data['datetime'].str.replace(r' E[SD]T$', '', regex=True)
+                data['datetime'] = pd.to_datetime(datetime_clean, format='%Y-%m-%d %H:%M:%S')
             except:
-                data['datetime'] = pd.to_datetime(data['datetime'], errors='coerce')
+                try:
+                    # Fallback to automatic parsing
+                    data['datetime'] = pd.to_datetime(data['datetime'].str.replace(r' E[SD]T$', '', regex=True))
+                except:
+                    # Final fallback
+                    data['datetime'] = pd.to_datetime(data['datetime'], errors='coerce')
     
     # Extract date using vectorized operations
     if 'date' not in data.columns:
@@ -194,9 +267,34 @@ def chunk_combinations(combinations: List[Dict], chunk_size: int = 1000) -> List
     """Split combinations into chunks for better memory management"""
     return [combinations[i:i + chunk_size] for i in range(0, len(combinations), chunk_size)]
 
+def save_trades_to_csv(trades: List[Dict], combo: Dict, symbol: str, timeframe: str, is_options: bool):
+    """Save individual trades to CSV file"""
+    try:
+        # Create trades directory structure
+        if is_options:
+            trades_dir = f'data/trades/options/{symbol}'
+        else:
+            trades_dir = f'data/trades/{timeframe}/{symbol}'
+        
+        os.makedirs(trades_dir, exist_ok=True)
+        
+        # Create filename based on indicator parameters
+        param_str = '_'.join([f"{k}_{v}" for k, v in combo.items()])
+        filename = f'trades_{param_str}.csv'
+        filepath = os.path.join(trades_dir, filename)
+        
+        # Convert trades to DataFrame and save
+        trades_df = pd.DataFrame(trades)
+        trades_df.to_csv(filepath, index=False)
+        
+        logger.debug(f"Saved {len(trades)} trades to {filepath}")
+        
+    except Exception as e:
+        logger.warning(f"Failed to save trades for combo {combo}: {e}")
+
 def process_chunk_optimized(args: Tuple) -> List[Dict]:
     """Optimized chunk processing function"""
-    data, combinations_chunk, is_options = args
+    data, combinations_chunk, is_options, symbol, timeframe = args
     
     results = []
     for combo in combinations_chunk:
@@ -204,7 +302,14 @@ def process_chunk_optimized(args: Tuple) -> List[Dict]:
             # Ensure data is a copy to avoid issues in parallel processing
             data_copy = data.copy()
             result = backtest(data_copy, combo, is_options=is_options)
-            results.append(result)
+            
+            # Save individual trades to CSV if trades exist
+            if result.get('trades') and len(result['trades']) > 0:
+                save_trades_to_csv(result['trades'], combo, symbol, timeframe, is_options)
+            
+            # Remove trades from result to keep summary data only
+            result_without_trades = {k: v for k, v in result.items() if k != 'trades'}
+            results.append(result_without_trades)
         except Exception as e:
             logger.warning(f"Backtest failed for combo {combo}: {e}")
             continue
@@ -232,7 +337,7 @@ def test_indicator_period_combinations_optimized(
     
     # Preprocess data once
     data = preprocess_data_optimized(data.copy(), is_options)
-    
+
     # Split combinations into chunks for better memory management
     chunks = chunk_combinations(test_combinations, chunk_size)
     logger.info(f"Split into {len(chunks)} chunks of size {chunk_size}")
@@ -247,7 +352,7 @@ def test_indicator_period_combinations_optimized(
             # Submit chunks instead of individual combinations
             futures = []
             for chunk in chunks:
-                future = executor.submit(process_chunk_optimized, (data, chunk, is_options))
+                future = executor.submit(process_chunk_optimized, (data, chunk, is_options, symbol, timeframe))
                 futures.append(future)
             
             # Collect results with progress tracking
@@ -262,7 +367,7 @@ def test_indicator_period_combinations_optimized(
     else:
         # Sequential processing with chunks
         for i, chunk in enumerate(chunks):
-            chunk_results = process_chunk_optimized((data, chunk, is_options))
+            chunk_results = process_chunk_optimized((data, chunk, is_options, symbol, timeframe))
             all_results.extend(chunk_results)
             chunk_tracker.update(1)
     
@@ -334,12 +439,9 @@ def test_intraday_periods_optimized(
     
     logger.info(f"Processing symbols: {symbols}")
 
-    # Base configurations
-    base_configs = {
-        'QQQ': {},
-        'SPY': {}
-    }
-
+    # Use indicator configuration from config file
+    logger.info(f"Using indicator configuration: {list(INDICATOR_RANGES.keys())}")
+    
     # Initialize overall progress tracker
     overall_tracker = ProgressTracker(len(symbols), "Overall Symbol Processing")
     
@@ -347,8 +449,8 @@ def test_intraday_periods_optimized(
         symbol_start = time.time()
         logger.info(f"Starting processing for {symbol}")
         
-        base_periods = base_configs.get(symbol, {})
-        test_combinations = generate_combinations_optimized(base_periods)
+        # Generate combinations using the full indicator configuration
+        test_combinations = generate_combinations_optimized(INDICATOR_RANGES)
         
         test_intraday_periods_for_optimized(
             symbol, is_options, test_combinations, use_parallel, max_workers, chunk_size
